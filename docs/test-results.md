@@ -40,3 +40,18 @@ Sources: ipify for IPv4; ipapi.co for metadata.
 IPv6 connectivity was not verified.
 CLI and GUI integration remain untested.
 Public IP and PTR values are omitted from this report.
+
+## Live Offline Test
+
+Condition: Internet connection disabled.
+Command: python ip_core.py
+
+Result: PASS
+
+- IPv4 displayed "Unavailable".
+- IPv6 displayed "Not Detected".
+- Metadata fields displayed "Unknown".
+- Connection failures were recorded in errors.
+- Application completed without a traceback or crash.
+
+Scope: Core module only; CLI and GUI offline behavior remain untested.
