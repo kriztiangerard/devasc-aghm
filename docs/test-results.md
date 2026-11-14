@@ -23,3 +23,20 @@ Total: 9 passed in 0.70 seconds.
 ## Scope
 HTTP requests were mocked. Actual network connectivity,
 IPv6-only operation, and CLI/GUI integration remain untested.
+
+## Live Network Test
+
+Command: python ip_core.py
+
+- Public IPv4 retrieval: PASS
+- ISP, ASN, and location retrieval: PASS
+- PTR retrieval: PASS
+- IPv6 connection failure handling: PASS — displayed "Not Detected"
+  and returned results without crashing.
+- NAT status returned: Behind NAT (private LAN address)
+
+Sources: ipify for IPv4; ipapi.co for metadata.
+
+IPv6 connectivity was not verified.
+CLI and GUI integration remain untested.
+Public IP and PTR values are omitted from this report.
