@@ -27,6 +27,10 @@ from ip_core import get_public_ip_info
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
+WINDOW_WIDTH = 520
+MIN_HEIGHT = 480
+STATUS_WRAP = WINDOW_WIDTH - 40  # window width minus 20 px padding on each side
+
 COLORS = {
     "bg": "#F4F6F8",
     "card": "#FFFFFF",
@@ -94,7 +98,7 @@ class IPDiagnosticApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Public IP Diagnostic Tool")
-        self.geometry("520x480")
+        self.geometry(f"{WINDOW_WIDTH}x{MIN_HEIGHT}")
         self.resizable(False, False)
 
         self.style = ttk.Style(self)
@@ -109,7 +113,7 @@ class IPDiagnosticApp(tk.Tk):
         self.configure_styles()
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(100, self._poll_results)
+        self._poll_id = self.after(100, self._poll_results)
         self.refresh_data()
 
     # ---- setup ------------------------------------------------------------
@@ -173,8 +177,10 @@ class IPDiagnosticApp(tk.Tk):
         self.copy_btn.pack(side="left")
 
         # Status bar
+        # wraplength makes long warnings wrap instead of running off the window
         self.status_label = ttk.Label(self, text="Ready", style="Status.TLabel",
-                                      padding=(20, 0, 20, 12))
+                                      padding=(20, 0, 20, 12),
+                                      wraplength=STATUS_WRAP, justify="left")
         self.status_label.pack(anchor="w", fill="x")
 
     # ---- actions ----------------------------------------------------------
@@ -208,7 +214,7 @@ class IPDiagnosticApp(tk.Tk):
             pass
         else:
             self._update_ui(data, warnings)
-        self.after(100, self._poll_results)
+        self._poll_id = self.after(100, self._poll_results)
 
     def _update_ui(self, data, warnings):
         for key, label in self.fields.items():
@@ -218,7 +224,8 @@ class IPDiagnosticApp(tk.Tk):
         self.last_updated = datetime.now()
         stamp = self.last_updated.strftime("%H:%M:%S")
         if warnings:
-            self._set_status(f"Updated {stamp} with issues: " + "; ".join(warnings),
+            # one warning per line so each message is easy to read in full
+            self._set_status(f"Updated {stamp} with issues:\n" + "\n".join(warnings),
                              COLORS["warn"])
         else:
             self._set_status(f"Data updated successfully at {stamp}.", COLORS["ok"])
@@ -246,9 +253,16 @@ class IPDiagnosticApp(tk.Tk):
     # ---- helpers ----------------------------------------------------------
     def _set_status(self, text, color):
         self.status_label.config(text=text, foreground=color)
+        self._fit_height()
+
+    def _fit_height(self):
+        """Grow the (fixed-width) window so the whole status message is visible."""
+        self.update_idletasks()
+        self.geometry(f"{WINDOW_WIDTH}x{max(MIN_HEIGHT, self.winfo_reqheight())}")
 
     def _on_close(self):
         self._closing = True
+        self.after_cancel(self._poll_id)
         self.destroy()
 
 
