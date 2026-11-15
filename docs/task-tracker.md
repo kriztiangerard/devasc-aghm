@@ -2,11 +2,13 @@
 
 | Task | Owner | Status | Notes |
 |---|---|---|---|
-| Core networking module | Member 1 | In Review | Commit 11132af tested; 9 automated tests passed. |
-| Desktop GUI | Member 2 | Pending Update | Branch not yet visible on remote. |
-| CLI application | Member 3 | Pending Update | Branch not yet visible on remote. |
-| QA test plan | Member 4 | Completed | Initial test plan pushed. |
-| Core module QA | Member 4 | Completed | Automated, live IPv4, and offline tests passed. |
-| Dependencies | Member 4 | Completed | Aligned with tested core module. |
-| CLI and GUI QA | Member 4 | Blocked | Awaiting application scripts. |
-| Final integration and presentation | All members | Not Started | Awaiting remaining components. |
+| Core networking module | Member 1 | Completed | Merged into main. |
+| Desktop GUI | Member 2 | Completed | Merged; tested functions passed. Warning clipping remains open. |
+| CLI application | Member 3 | Completed | Merged; tested functions passed. Repeated Unknown is a usability suggestion. |
+| QA test plan | Member 4 | Completed | Test plan documented. |
+| Core module QA | Member 4 | Completed | Results recorded separately for each tested version. |
+| Dependencies | Member 4 | Completed | requests and pytest documented. |
+| CLI and GUI QA | Member 4 | Completed | Executed checks passed; live IPv6 and GUI rate-limit checks remain unverified. |
+| Final integration QA | Member 4 | Completed | Main commit 172079c: 12 automated tests and online smoke checks passed. |
+| QA documentation merge | Team reviewer | Pending Review | QA reports are on qa/tests-docs. |
+| Final presentation | All members | Pending Update | Confirm preparation status with the team. |
