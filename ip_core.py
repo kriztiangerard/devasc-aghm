@@ -23,6 +23,7 @@ Nothing in here raises on network problems; failures end up in "errors".
 """
 
 import ipaddress
+import re
 import socket
 import time
 
@@ -263,9 +264,110 @@ def get_public_ip_info(include_extras=False):
     return results
 
 
+# --------------------------------------------------------------------------
+# BL-07: arbitrary target validation and lookup
+# --------------------------------------------------------------------------
+def _validate_target(target):
+    """Normalize an IPv4 address, IPv6 address, or DNS hostname.
+
+    Returns:
+        tuple: (normalized target, is_ip_address).
+
+    Raises:
+        ValueError: If the supplied target is invalid.
+    """
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("Target must not be empty.")
+
+    target = target.strip()
+
+    # Scoped IPv6 addresses are local-interface identifiers rather than
+    # ordinary public IP lookup targets.
+    if "%" in target:
+        raise ValueError("Scoped IP addresses are not supported.")
+
+    # Accept valid literal IPv4 and IPv6 addresses directly.
+    try:
+        return str(ipaddress.ip_address(target)), True
+    except ValueError:
+        pass
+
+    # Prevent malformed IP literals from being treated as hostnames.
+    if ":" in target or re.fullmatch(r"[0-9.]+", target):
+        raise ValueError("Invalid IP address.")
+
+    # Convert internationalized domain names to DNS-compatible ASCII.
+    try:
+        hostname = target.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("Invalid hostname.") from None
+
+    # A trailing dot is valid for a fully qualified DNS hostname.
+    labels = hostname.rstrip(".").split(".")
+
+    if (
+        hostname.endswith("..")
+        or len(hostname.rstrip(".")) > 253
+        or not all(
+            re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+                label,
+            )
+            for label in labels
+        )
+    ):
+        raise ValueError(
+            "Invalid hostname. Enter an IP address or hostname, not a URL."
+        )
+
+    return hostname.lower(), False
+
+
+def _resolve_target_hostname(hostname):
+    """Resolve a hostname to one IPv4 or IPv6 address.
+
+    IPv4 is preferred for compatibility with the original lookup behavior.
+    IPv6 is used when no IPv4 address is available.
+    """
+    records = socket.getaddrinfo(
+        hostname,
+        None,
+        family=socket.AF_UNSPEC,
+        type=socket.SOCK_STREAM,
+    )
+
+    addresses = []
+
+    for family, _, _, _, sockaddr in records:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+
+        if address not in addresses:
+            addresses.append(address)
+
+    for version in (4, 6):
+        for address in addresses:
+            if address.version == version:
+                return str(address)
+
+    raise OSError("No IPv4 or IPv6 address found.")
+
+
 def lookup_ip(target):
-    """Metadata for any IP or hostname (BL-07). Never raises."""
+    """Retrieve metadata for an arbitrary IPv4, IPv6, or hostname.
+
+    Validation and DNS failures are returned through the errors list.
+    Metadata retrieval reuses the existing provider failover mechanism.
+
+    The result structure remains compatible with CLI exports and the GUI.
+    """
     errors = []
+
     results = {
         "target": target,
         "ip": UNKNOWN,
@@ -277,17 +379,31 @@ def lookup_ip(target):
         "asn": UNKNOWN,
         "errors": errors,
     }
+
     try:
-        ip = str(ipaddress.ip_address(target))
-    except ValueError:
+        normalized, is_ip = _validate_target(target)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return results
+
+    results["target"] = target.strip()
+
+    if is_ip:
+        ip = normalized
+    else:
         try:
-            ip = socket.gethostbyname(target)
+            ip = _resolve_target_hostname(normalized)
         except OSError:
-            errors.append(f"could not resolve '{target}'")
+            errors.append(f"could not resolve '{normalized}'")
             return results
+
+    # Preserve the resolved IP even when metadata providers fail.
     results["ip"] = ip
+
+    # Reuse the shared metadata retrieval and failover implementation.
     meta, _, _ = _lookup_metadata(ip, errors)
     _apply_meta(results, meta)
+
     return results
 
 

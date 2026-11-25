@@ -9,17 +9,19 @@ Responsibilities:
     - Display fallback values when information is unavailable.
     - Report unexpected errors and return an appropriate exit status.
 
-Supports human-readable text, JSON, and CSV output without
+Supports self-diagnostics and arbitrary IPv4, IPv6, or hostname
+lookups through human-readable text, JSON, and CSV output without
 duplicating the backend's network retrieval logic.
 """
 
 import argparse
 import csv
 import io
+import ipaddress
 import json
 import sys
 
-from ip_core import get_public_ip_info
+from ip_core import UNKNOWN, get_public_ip_info, lookup_ip
 
 
 def format_report(info):
@@ -61,10 +63,55 @@ def format_report(info):
     return "\n".join(lines)
 
 
+def format_target_report(info):
+    """Convert arbitrary target lookup results into readable text.
+
+    Unlike the self-diagnostic report, this report displays the
+    requested target and its resolved IP address.
+    """
+    resolved_ip = info.get("ip") or UNKNOWN
+
+    try:
+        version = f"IPv{ipaddress.ip_address(resolved_ip).version}"
+    except ValueError:
+        version = UNKNOWN
+
+    location = ", ".join(
+        str(info.get(key) or UNKNOWN)
+        for key in ("city", "region", "country")
+    )
+
+    country_code = info.get("country_code") or UNKNOWN
+
+    lines = [
+        "=" * 60,
+        "          TARGET IP & NETWORK LOOKUP (CLI)",
+        "=" * 60,
+        f"  Target              : {info.get('target') or UNKNOWN}",
+        f"  Resolved IP Address : {resolved_ip}",
+        f"  IP Version          : {version}",
+        f"  ISP / Organization  : {info.get('isp') or UNKNOWN}",
+        f"  ASN                 : {info.get('asn') or UNKNOWN}",
+        f"  Location            : {location} ({country_code})",
+        "=" * 60,
+    ]
+
+    return "\n".join(lines)
+
+
 def parse_args(argv=None):
-    """Parse CLI arguments and enforce mutually exclusive export formats."""
+    """Parse target lookup and mutually exclusive export arguments."""
     parser = argparse.ArgumentParser(
         description="Public IP & Network Diagnostic Utility"
+    )
+
+    parser.add_argument(
+        "--target",
+        metavar="IP_OR_HOSTNAME",
+        help=(
+            "Look up an arbitrary IPv4 address, IPv6 address, "
+            "or hostname instead of your own public IP."
+        ),
     )
 
     formats = parser.add_mutually_exclusive_group()
@@ -117,37 +164,52 @@ def format_csv(info):
 
 
 def main(argv=()):
-    """Retrieve network information and display the selected output format.
+    """Run a self-diagnostic or arbitrary target lookup.
 
     Args:
-        argv: Command-line arguments. An empty sequence uses text mode.
+        argv: Command-line arguments. An empty sequence uses the
+              original self-diagnostic mode.
               None reads arguments from the actual command line.
 
     Returns:
-        int: 0 when the diagnostic completes, including when no public
-        IP is detected; 1 if an unexpected exception occurs.
+        int: 0 when the diagnostic completes; 1 when target
+        validation, resolution, or an unexpected exception fails.
 
     Invalid command-line arguments are handled by argparse.
+    Metadata failures do not invalidate an otherwise resolved IP.
     """
     args = parse_args(argv)
     export_mode = args.json or args.csv
+    target_mode = args.target is not None
 
-    # Keep machine-readable stdout free from progress and error messages.
+    # Keep machine-readable stdout free from diagnostic messages.
     message_stream = sys.stderr if export_mode else sys.stdout
 
-    print(
-        "Gathering network information, please wait...\n",
-        file=message_stream,
-    )
+    if target_mode:
+        print(
+            f"Looking up target: {args.target!r}, please wait...\n",
+            file=message_stream,
+        )
+    else:
+        print(
+            "Gathering network information, please wait...\n",
+            file=message_stream,
+        )
 
     try:
-        # Reuse the shared backend for every output format.
-        info = get_public_ip_info()
+        # Select the shared backend based on the requested mode.
+        if target_mode:
+            info = lookup_ip(args.target)
+        else:
+            info = get_public_ip_info()
 
+        # Reuse the BL-03 serializers for both diagnostic modes.
         if args.json:
             print(format_json(info))
         elif args.csv:
             sys.stdout.write(format_csv(info))
+        elif target_mode:
+            print(format_target_report(info))
         else:
             print(format_report(info))
 
@@ -158,7 +220,26 @@ def main(argv=()):
         )
         return 1
 
-    # Keep offline notices separate from machine-readable output.
+    if target_mode:
+        # Validation and DNS failures leave the resolved IP unknown.
+        if not info.get("ip") or info.get("ip") == UNKNOWN:
+            print(
+                "\nError: Target lookup failed.",
+                file=message_stream,
+            )
+
+            for error in info.get("errors", []):
+                print(f"  - {error}", file=message_stream)
+
+            return 1
+
+        # A resolved IP remains useful even when metadata is incomplete.
+        for error in info.get("errors", []):
+            print(f"Warning: {error}", file=message_stream)
+
+        return 0
+
+    # Preserve the original self-diagnostic offline behavior.
     if info.get("ipv4") == "Unavailable" and info.get("ipv6") == "Not Detected":
         print(
             "\nNotice: No public IP address could be detected.",

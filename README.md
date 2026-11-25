@@ -157,3 +157,235 @@ any automated test failures.
 
 BL-07 target lookup and BL-09 GUI target search are separate
 Activity 4 backlog items.
+
+## BL-07 — Arbitrary Target IP Lookup
+
+BL-07 extends the Public IP & Network Diagnostic Utility to retrieve
+network metadata for a user-specified IPv4 address, IPv6 address,
+or DNS hostname instead of only the user's own public IP address.
+
+### Usage
+
+Look up an IPv4 address:
+
+```bash
+python ip_diagnostic.py --target 8.8.8.8
+```
+
+Look up an IPv6 address:
+
+```bash
+python ip_diagnostic.py --target 2001:4860:4860::8888
+```
+
+Look up a hostname:
+
+```bash
+python ip_diagnostic.py --target google.com
+```
+
+Export target results as JSON:
+
+```bash
+python ip_diagnostic.py --target example.com --json
+```
+
+Export target results as CSV:
+
+```bash
+python ip_diagnostic.py --target 1.1.1.1 --csv
+```
+
+Save target results to files:
+
+```bash
+python ip_diagnostic.py --target example.com --json > target.json
+python ip_diagnostic.py --target 8.8.8.8 --csv > target.csv
+```
+
+Running the application without `--target` retains the original
+self-diagnostic behavior:
+
+```bash
+python ip_diagnostic.py
+```
+
+Display available CLI arguments:
+
+```bash
+python ip_diagnostic.py --help
+```
+
+### Supported Target Inputs
+
+- Literal IPv4 addresses.
+- Literal IPv6 addresses.
+- DNS hostnames, including IPv6-only hostnames.
+- Internationalized hostnames through IDNA conversion.
+- Valid hostnames with a trailing DNS root dot.
+- Inputs with surrounding whitespace.
+
+IPv4 is preferred when a hostname resolves to both IPv4 and IPv6
+addresses. IPv6 is selected when no IPv4 address is available.
+
+Malformed IP addresses, empty inputs, URLs, invalid hostname
+characters, ports, and scoped IPv6 addresses are rejected.
+
+### Target Report Fields
+
+| Field | Description |
+| --- | --- |
+| target | Requested IP address or hostname |
+| ip | Resolved or normalized IP address |
+| city | Provider-reported city |
+| region | Provider-reported region |
+| country | Provider-reported country |
+| country_code | Country code |
+| isp | ISP or network organization |
+| asn | Autonomous System Number |
+| errors | Validation, resolution, or provider errors |
+
+The human-readable report also displays the resolved IP version.
+
+JSON and CSV exports preserve the backend result fields. The errors
+list is JSON-encoded inside the corresponding CSV cell.
+
+Progress messages and warnings are sent to stderr when JSON or CSV
+output is requested, keeping stdout machine-readable.
+
+### Error Handling and Exit Codes
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Diagnostic completed or target IP successfully resolved |
+| 1 | Target validation, DNS resolution, or unexpected execution failure |
+| 2 | Invalid command-line arguments |
+
+A resolved IP remains available even if metadata providers fail.
+Unavailable metadata fields use the `Unknown` fallback value.
+
+Invalid or unresolvable targets return exit code 1 and meaningful
+error information. JSON and CSV output remains available for these
+expected lookup failures.
+
+### Backend Architecture
+
+BL-07 reuses the shared networking backend in `ip_core.py`.
+
+| Function | Responsibility |
+| --- | --- |
+| `_validate_target(target)` | Validate and normalize IP addresses and hostnames |
+| `_resolve_target_hostname(hostname)` | Resolve IPv4 and IPv6 DNS records |
+| `lookup_ip(target)` | Coordinate target validation, resolution, and metadata retrieval |
+| `_lookup_metadata(ip, errors)` | Reuse existing metadata provider failover |
+| `_apply_meta(results, meta)` | Populate metadata and fallback values |
+
+The metadata retrieval mechanism uses ipapi.co as the primary
+provider and ipwho.is as the fallback provider.
+
+BL-07 does not introduce another HTTP client or duplicate the
+existing provider implementation.
+
+### CLI Architecture
+
+The CLI implementation is located in `ip_diagnostic.py`.
+
+| Function | Responsibility |
+| --- | --- |
+| `parse_args(argv)` | Parse target and export arguments |
+| `format_target_report(info)` | Format human-readable target results |
+| `format_json(info)` | Reuse BL-03 JSON serialization |
+| `format_csv(info)` | Reuse BL-03 CSV serialization |
+| `main(argv)` | Select diagnostic mode, output format, and exit status |
+
+The original self-diagnostic formatter and backend entry point
+remain available.
+
+### Integration Reference for BL-09
+
+The GUI can reuse the public backend function directly:
+
+```python
+from ip_core import lookup_ip
+
+result = lookup_ip("example.com")
+```
+
+The returned dictionary contains the requested target, resolved
+IP address, metadata fields, and an errors list.
+
+GUI implementations should perform network requests in a background
+worker to avoid blocking the Tkinter event loop. Widget updates
+should remain on the main GUI thread.
+
+The GUI should distinguish between an unresolved target and a
+resolved target with unavailable metadata.
+
+### Automated Testing
+
+Dedicated BL-07 tests:
+
+```bash
+python -m pytest test_target_lookup.py -v
+```
+
+Complete regression suite:
+
+```bash
+python -m pytest -v
+```
+
+BL-07 tests mock DNS and HTTP operations for deterministic,
+offline verification.
+
+### Implementation Verification
+
+Verification date: November 26, 2026.
+
+Environment: macOS, Python 3.9.6, pytest 8.4.2.
+
+| Test suite | Passed | Failed |
+| --- | ---: | ---: |
+| BL-07 target lookup | 59 | 0 |
+| BL-03 CLI export | 19 | 0 |
+| Core networking | 17 | 0 |
+| Original CLI | 5 | 0 |
+| Total integrated tests | 100 | 0 |
+
+Live verification:
+
+| Scenario | Result |
+| --- | --- |
+| Literal IPv4 lookup | PASS |
+| Literal IPv6 lookup | PASS |
+| Hostname lookup | PASS |
+| Target JSON export | PASS |
+| Target CSV export | PASS |
+| Invalid IPv4 rejection | PASS |
+| Unresolvable hostname | PASS |
+| Empty target rejection | PASS |
+| Original self-diagnostic | PASS |
+
+All nine live scenarios passed manual inspection.
+
+Live HTTP 429 responses from the primary metadata provider were
+observed during hostname and CSV lookups. Metadata retrieval
+continued successfully through the existing failover mechanism.
+
+Python syntax validation and Git diff checks also passed.
+
+### Verification Notes and Limitations
+
+- Metadata availability depends on external providers and their
+  rate limits.
+- IP geolocation is approximate and does not identify a precise
+  physical location.
+- Hostnames may resolve to different addresses over time.
+- One resolved address is selected per hostname lookup.
+- Looking up an IPv6 target does not independently verify local
+  IPv6 connectivity.
+- The test environment emitted an existing urllib3 LibreSSL
+  compatibility warning. Automated tests and live requests
+  completed successfully despite this warning.
+- GUI target search and interactive lookup are addressed
+  separately under BL-09.

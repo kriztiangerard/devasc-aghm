@@ -125,7 +125,7 @@ def test_detect_nat():
 
 
 def test_lookup_ip_unresolvable_host():
-    with patch("ip_core.socket.gethostbyname", side_effect=OSError()):
+    with patch("ip_core.socket.getaddrinfo", side_effect=OSError()):
         res = ip_core.lookup_ip("not-a-real-host.invalid")
     assert res["errors"]
     assert res["ip"] == ip_core.UNKNOWN
