@@ -389,3 +389,124 @@ Python syntax validation and Git diff checks also passed.
   completed successfully despite this warning.
 - GUI target search and interactive lookup are addressed
   separately under BL-09.
+
+## BL-09 — Interactive Target Lookup and GUI Search
+
+### Interactive CLI
+
+Start an interactive target lookup session:
+
+```bash
+python ip_diagnostic.py --interactive
+```
+
+Supported inputs:
+
+- IPv4 address: `8.8.8.8`
+- IPv6 address: `2001:4860:4860::8888`
+- Hostname: `google.com`
+
+Users can perform multiple lookups without restarting the
+application. Enter `exit` or `quit` to end the session.
+EOF and Ctrl+C also terminate the session gracefully.
+
+Interactive mode cannot be combined with `--target`,
+`--json`, or `--csv`.
+
+Invalid inputs and failed lookups display error messages
+without terminating the interactive session.
+
+### Desktop GUI
+
+Launch the application:
+
+```bash
+python ip_diagnostic_gui.py
+```
+
+The application initially displays the user's public
+network details.
+
+To perform a target lookup:
+
+1. Enter an IPv4 address, IPv6 address, or hostname.
+2. Click Search or press Enter.
+3. Review the target lookup results.
+4. Click Copy Report to copy the displayed diagnostic report.
+5. Click My Public IP to return to self-diagnostic mode.
+
+Target lookup results include:
+
+- Original target
+- Resolved IP address
+- IP version
+- ISP or organization
+- Autonomous System Number (ASN)
+- Geographic location
+- Country code
+
+Network requests run in a background thread to avoid
+blocking the GUI. Request controls are disabled while
+a lookup is in progress to prevent conflicting requests.
+
+The status message distinguishes successful lookups,
+nonfatal warnings, and failed lookups.
+
+### Integration
+
+BL-09 reuses the shared BL-07 `lookup_ip()` function
+from `ip_core.py`. It does not introduce a separate
+target lookup backend.
+
+Existing self-diagnostic functionality and BL-03
+machine-readable exports remain supported.
+
+No new third-party application dependencies are required.
+The desktop GUI requires a Python installation with
+working Tcl/Tk bindings.
+
+### Automated Testing
+
+Run the dedicated BL-09 tests:
+
+```bash
+python -m pytest test_interactive_lookup.py -v
+```
+
+Run the complete regression suite:
+
+```bash
+python -m pytest -v
+```
+
+### Developer Verification
+
+Verification date: November 26, 2026.
+
+| Verification | Result |
+|---|---|
+| Dedicated BL-09 automated tests | 42/42 passed |
+| Full regression suite | 142/142 passed |
+| Live interactive CLI | Passed |
+| GUI startup and layout | Passed |
+| GUI IPv4 target lookup | Passed |
+| GUI IPv6 target lookup | Passed |
+| GUI hostname lookup | Passed |
+| Copy self-diagnostic report | Passed |
+
+Automated tests were executed using the original Python
+3.9.6 virtual environment. Live GUI smoke tests were
+performed using Homebrew Python 3.12.16 with Tk 9.1.0.
+
+### Verification Notes
+
+- IP metadata and geographic location depend on external
+  providers and may vary between requests.
+- Provider failures may produce warnings even when a
+  fallback provider successfully retrieves metadata.
+- A local macOS Python/Tkinter compatibility issue
+  required a temporary runtime workaround during
+  developer GUI testing. This is not an application
+  dependency or a recommended production configuration.
+- Comprehensive manual GUI testing and independent
+  acceptance criteria verification remain assigned to QA.

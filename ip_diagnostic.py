@@ -12,6 +12,9 @@ Responsibilities:
 Supports self-diagnostics and arbitrary IPv4, IPv6, or hostname
 lookups through human-readable text, JSON, and CSV output without
 duplicating the backend's network retrieval logic.
+
+Interactive target lookup sessions support repeated lookups
+without restarting the application.
 """
 
 import argparse
@@ -114,6 +117,12 @@ def parse_args(argv=None):
         ),
     )
 
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Start an interactive target lookup session.",
+    )
+
     formats = parser.add_mutually_exclusive_group()
 
     formats.add_argument(
@@ -128,7 +137,19 @@ def parse_args(argv=None):
         help="Output diagnostic results as CSV.",
     )
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    # Interactive sessions produce multiple human-readable reports.
+    # Keep them separate from single-result machine-readable exports.
+    if args.interactive and (
+        args.target is not None or args.json or args.csv
+    ):
+        parser.error(
+            "--interactive cannot be combined with "
+            "--target, --json, or --csv."
+        )
+
+    return args
 
 
 def format_json(info):
@@ -163,8 +184,61 @@ def format_csv(info):
     return output.getvalue()
 
 
+def interactive_lookup():
+    """Run repeated target lookups within one terminal session.
+
+    Reuses the BL-07 backend and report formatter. Failed lookups
+    do not terminate the session, allowing users to correct their
+    input and try again.
+
+    Returns:
+        int: 0 when the interactive session ends normally.
+    """
+    print("\n=== INTERACTIVE TARGET LOOKUP ===")
+    print("Enter an IPv4 address, IPv6 address, or hostname.")
+    print("Type 'exit' or 'quit' to leave.\n")
+
+    while True:
+        try:
+            target = input("Target: ").strip()
+
+            if target.lower() in ("exit", "quit"):
+                break
+
+            if not target:
+                print("Error: Target must not be empty.\n")
+                continue
+
+            print(f"Looking up target: {target!r}, please wait...\n")
+
+            try:
+                info = lookup_ip(target)
+                print(format_target_report(info))
+
+                if not info.get("ip") or info.get("ip") == UNKNOWN:
+                    print("\nError: Target lookup failed.")
+
+                    for error in info.get("errors", []):
+                        print(f"  - {error}")
+                else:
+                    for error in info.get("errors", []):
+                        print(f"Warning: {error}")
+
+            except Exception as exc:
+                print(f"Unable to complete target lookup: {exc}")
+
+            print()
+
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+    print("Interactive lookup ended.")
+    return 0
+
+
 def main(argv=()):
-    """Run a self-diagnostic or arbitrary target lookup.
+    """Run a self-diagnostic, target lookup, or interactive session.
 
     Args:
         argv: Command-line arguments. An empty sequence uses the
@@ -179,6 +253,10 @@ def main(argv=()):
     Metadata failures do not invalidate an otherwise resolved IP.
     """
     args = parse_args(argv)
+
+    if args.interactive:
+        return interactive_lookup()
+
     export_mode = args.json or args.csv
     target_mode = args.target is not None
 
