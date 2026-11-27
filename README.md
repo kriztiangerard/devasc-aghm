@@ -536,3 +536,24 @@ Verification:
 - Live GUI retesting completed by the developer.
 
 Independent QA approval and backend integration remain pending.
+
+### BL-09 — Backend Integration Retest
+
+**Developer retest date:** November 27, 2026
+
+Integrated the latest main branch containing the backend fix
+for malformed API responses and provider failover (58c4f33).
+
+Integration results:
+- No merge conflicts.
+- Core networking: 60/60 tests passed.
+- Original CLI: 5/5 tests passed.
+- BL-03: 19/19 tests passed.
+- BL-07: 59/59 tests passed.
+- BL-09: 57/57 tests passed.
+- Full regression suite: 200/200 tests passed.
+- Live GUI integration retest completed successfully.
+- Previously verified GUI layout and status visibility preserved.
+- Existing LibreSSL warning remains non-blocking.
+
+Status: Ready for independent QA retesting and approval.
