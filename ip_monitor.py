@@ -11,7 +11,7 @@ import argparse
 import ipaddress
 import logging
 import math
-from threading import Event
+from threading import Event, TIMEOUT_MAX
 
 from ip_core import get_public_ip_info
 
@@ -47,10 +47,15 @@ class IPMonitor:
         """Perform one lookup and return detected change events."""
         try:
             info = self.fetch()
+
             if not isinstance(info, dict):
                 raise ValueError("Backend result must be a dictionary")
+
         except Exception as exc:
-            LOGGER.warning("Lookup failed; baseline retained: %s", exc)
+            LOGGER.warning(
+                "Lookup failed; baseline retained: %s",
+                exc,
+            )
             return []
 
         changes = []
@@ -59,14 +64,22 @@ class IPMonitor:
             current = self._valid_address(info.get(field), version)
 
             if current is None:
-                LOGGER.info("%s unavailable; baseline retained", field)
+                LOGGER.info(
+                    "%s unavailable; baseline retained",
+                    field,
+                )
                 continue
 
             previous = self.last_valid.get(field)
             self.last_valid[field] = current
 
             if previous is None:
-                LOGGER.info("%s baseline: %s", field, current)
+                LOGGER.info(
+                    "%s baseline: %s",
+                    field,
+                    current,
+                )
+
             elif previous != current:
                 change = {
                     "field": field,
@@ -76,47 +89,78 @@ class IPMonitor:
                 changes.append(change)
 
                 LOGGER.warning(
-                    "%s changed: %s -> %s", field, previous, current
+                    "%s changed: %s -> %s",
+                    field,
+                    previous,
+                    current,
                 )
 
                 if self.on_change is not None:
                     try:
-                        self.on_change(field, previous, current)
+                        self.on_change(
+                            field,
+                            previous,
+                            current,
+                        )
                     except Exception:
-                        LOGGER.exception("IP-change callback failed")
+                        LOGGER.exception(
+                            "IP-change callback failed"
+                        )
+
             else:
-                LOGGER.info("%s unchanged: %s", field, current)
+                LOGGER.info(
+                    "%s unchanged: %s",
+                    field,
+                    current,
+                )
 
         return changes
 
     def run(self, interval=60, stop_event=None):
         """Check immediately, then wait between completed lookups.
 
+        Reject unsupported intervals before any backend request.
         A stop event interrupts the wait. An active backend request
         finishes according to the backend's timeout behavior.
         """
-        if not math.isfinite(interval) or interval <= 0:
-            raise ValueError("Interval must be a positive finite number")
+        if (
+            not math.isfinite(interval)
+            or interval <= 0
+            or interval > TIMEOUT_MAX
+        ):
+            raise ValueError(
+                "Interval must be a positive finite number "
+                f"not exceeding {TIMEOUT_MAX} seconds"
+            )
 
-        stop_event = stop_event if stop_event is not None else Event()
+        stop_event = (
+            stop_event if stop_event is not None else Event()
+        )
 
         while not stop_event.is_set():
             self.check_once()
+
             if stop_event.wait(interval):
                 break
 
 
 def positive_interval(value):
+    """Parse an interval supported by threading.Event.wait()."""
     try:
         interval = float(value)
-    except ValueError:
+    except (ValueError, TypeError, OverflowError):
         raise argparse.ArgumentTypeError(
             "Interval must be a number"
         ) from None
 
-    if not math.isfinite(interval) or interval <= 0:
+    if (
+        not math.isfinite(interval)
+        or interval <= 0
+        or interval > TIMEOUT_MAX
+    ):
         raise argparse.ArgumentTypeError(
-            "Interval must be a positive finite number"
+            "Interval must be a positive finite number "
+            f"not exceeding {TIMEOUT_MAX} seconds"
         )
 
     return interval
@@ -130,7 +174,10 @@ def main(argv=None):
         "--interval",
         type=positive_interval,
         default=60,
-        help="Seconds to wait between completed checks (default: 60).",
+        help=(
+            "Seconds to wait between completed checks "
+            f"(default: 60; maximum: {TIMEOUT_MAX})."
+        ),
     )
     args = parser.parse_args(argv)
 

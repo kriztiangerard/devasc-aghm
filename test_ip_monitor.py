@@ -1,11 +1,11 @@
 """Offline tests for BL-06 monitoring; no live API calls."""
 
-from threading import Event
+from threading import Event, TIMEOUT_MAX
 from unittest.mock import Mock
 
 import pytest
 
-from ip_monitor import IPMonitor, main
+from ip_monitor import IPMonitor, main, positive_interval
 
 
 def test_first_address_sets_baseline_without_alert():
@@ -135,7 +135,10 @@ def test_callback_failure_does_not_stop_other_changes():
     assert callback.call_count == 2
 
 
-@pytest.mark.parametrize("interval", [0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "interval",
+    [0, -1, float("nan"), float("inf")],
+)
 def test_invalid_interval_rejected(interval):
     monitor = IPMonitor(fetch=Mock())
 
@@ -178,3 +181,28 @@ def test_main_stops_cleanly_on_keyboard_interrupt(monkeypatch):
 
     monkeypatch.setattr(IPMonitor, "run", interrupt)
     assert main(["--interval", "30"]) == 0
+
+
+def test_run_rejects_oversized_interval_before_fetch():
+    fetch = Mock()
+    monitor = IPMonitor(fetch=fetch)
+
+    with pytest.raises(ValueError):
+        monitor.run(interval=TIMEOUT_MAX * 2)
+
+    fetch.assert_not_called()
+
+
+def test_cli_rejects_oversized_interval_before_fetch(monkeypatch):
+    fetch = Mock()
+    monkeypatch.setattr("ip_monitor.get_public_ip_info", fetch)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--interval", str(TIMEOUT_MAX * 2)])
+
+    assert exc.value.code == 2
+    fetch.assert_not_called()
+
+
+def test_parser_accepts_maximum_supported_interval():
+    assert positive_interval(str(TIMEOUT_MAX)) == TIMEOUT_MAX
