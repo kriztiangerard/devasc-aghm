@@ -64,7 +64,7 @@ def check_privacy(target, api_key=None):
 
     result["ip"] = str(address)
 
-    if "%" in target or not address.is_global:
+    if "%" in target or not address.is_global or address.is_multicast:
         result["errors"].append(
             "A public, unscoped IP address is required."
         )
@@ -206,7 +206,7 @@ def check_hosting(target, api_key=None):
         )
         return result
 
-    if not address.is_global:
+    if not address.is_global or address.is_multicast:
         result["errors"].append(
             "Hosting lookup requires a public IP."
         )
@@ -336,7 +336,12 @@ def main(argv=None):
                 except (ValueError, TypeError):
                     continue
 
-                if address.is_global:
+                if (
+                    isinstance(candidate, str)
+                    and "%" not in candidate
+                    and address.is_global
+                    and not address.is_multicast
+                ):
                     target = str(address)
                     break
 
@@ -349,11 +354,15 @@ def main(argv=None):
 
     try:
         address = ipaddress.ip_address(result["ip"])
-        valid_target = address.is_global
+        valid_target = (
+            address.is_global
+            and not address.is_multicast
+            and "%" not in result["ip"]
+        )
     except (ValueError, TypeError):
         valid_target = False
 
-    if valid_target and result["status"] in {"complete", "partial"}:
+    if valid_target:
         hosting = check_hosting(result["ip"])
 
         result["hosting"] = hosting["hosting"]
@@ -362,11 +371,13 @@ def main(argv=None):
 
         fields = ("vpn", "proxy", "tor", "relay", "hosting")
 
-        result["status"] = (
-            "complete"
-            if all(result[field] != UNKNOWN for field in fields)
-            else "partial"
-        )
+        verified = [result[field] != UNKNOWN for field in fields]
+        if all(verified):
+            result["status"] = "complete"
+        elif any(verified):
+            result["status"] = "partial"
+        else:
+            result["status"] = "unavailable"
 
     print(json.dumps(result, indent=2))
 
