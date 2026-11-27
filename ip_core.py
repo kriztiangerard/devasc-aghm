@@ -68,8 +68,17 @@ def _http_get(url, timeout=TIMEOUT):
 # --------------------------------------------------------------------------
 # Response parsers
 # --------------------------------------------------------------------------
+def _json_object(resp):
+    """Decode JSON and require an object."""
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("expected a JSON object")
+    return data
+
+
 def _parse_json_ip(resp):
-    return resp.json()["ip"]
+    data = _json_object(resp)
+    return data.get("ip")
 
 
 def _parse_text_ip(resp):
@@ -102,8 +111,15 @@ def _resolve_ip(version, providers, errors):
         try:
             resp, latency = _http_get(url)
             ip = parser(resp)
-            if ipaddress.ip_address(ip).version != version:
-                raise ValueError(f"returned IPv{ipaddress.ip_address(ip).version}")
+            if not isinstance(ip, str) or not ip.strip():
+                raise ValueError("missing or invalid IP field")
+
+            ip = ip.strip()
+            address = ipaddress.ip_address(ip)
+
+            if address.version != version:
+                raise ValueError(f"returned IPv{address.version}")
+
             return ip, name, latency
         except NetworkError as exc:
             errors.append(f"IPv{version} via {name}: {exc}")
@@ -118,7 +134,7 @@ def _resolve_ip(version, providers, errors):
 def _meta_ipapi(ip):
     url = f"https://ipapi.co/{ip}/json/" if ip else "https://ipapi.co/json/"
     resp, latency = _http_get(url)
-    d = resp.json()
+    d = _json_object(resp)
     if d.get("error"):
         raise NetworkError(d.get("reason") or "ipapi.co returned an error")
     return {
@@ -133,11 +149,21 @@ def _meta_ipapi(ip):
 
 def _meta_ipwho(ip):
     resp, latency = _http_get(f"https://ipwho.is/{ip}")
-    d = resp.json()
+    d = _json_object(resp)
     if not d.get("success", True):
         raise NetworkError(d.get("message") or "ipwho.is returned an error")
-    conn = d.get("connection") or {}
+    conn = d.get("connection")
+    if conn is None:
+        conn = {}
+    if not isinstance(conn, dict):
+        raise ValueError("invalid connection object")
+
     asn = conn.get("asn")
+    if asn is not None:
+        if isinstance(asn, bool) or not isinstance(asn, (int, str)):
+            raise ValueError("invalid ASN field")
+        if not str(asn).isascii() or not str(asn).isdigit():
+            raise ValueError("invalid ASN field")
     return {
         "city": d.get("city"),
         "region": d.get("region"),
@@ -156,6 +182,25 @@ def _lookup_metadata(ip, errors):
     for name, fn in providers:
         try:
             meta, latency = fn(ip)
+
+            if not isinstance(meta, dict):
+                raise ValueError("expected a metadata object")
+
+            for key, value in meta.items():
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"invalid metadata field: {key}")
+
+            meta = {
+                key: value.strip() if isinstance(value, str) else None
+                for key, value in meta.items()
+            }
+
+            if not any(
+                value and value.lower() != "unknown"
+                for value in meta.values()
+            ):
+                raise ValueError("no usable metadata fields")
+
             return meta, name, latency
         except NetworkError as exc:
             errors.append(f"metadata via {name}: {exc}")
