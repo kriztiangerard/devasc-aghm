@@ -1,7 +1,7 @@
 """BL-09 interactive CLI and GUI target lookup tests."""
 
 import queue
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 
 import pytest
 
@@ -562,3 +562,137 @@ def test_gui_original_palette():
         "warn": "#B26A00",
         "error": "#B3261E",
     }
+
+
+# GUI-19: status footer regression tests.
+
+@pytest.mark.parametrize(
+    "message,color",
+    [
+        ("Querying network endpoints...", "muted"),
+        ("Network details updated successfully.", "ok"),
+        ("Metadata unavailable. " * 30, "warn"),
+        ("Target lookup failed. " * 30, "error"),
+    ],
+)
+def test_gui_scrollable_status(message, color):
+    app = fake_app()
+
+    gui.IPDiagnosticApp._set_status(
+        app, message, gui.COLORS[color]
+    )
+
+    assert app.status_text.method_calls == [
+        call.configure(
+            state="normal", foreground=gui.COLORS[color]
+        ),
+        call.delete(
+            "1.0", "end"
+        ),
+        call.insert(
+            "1.0", message, "status"
+        ),
+        call.configure(
+            state="disabled"
+        ),
+        call.yview_moveto(0),
+    ]
+
+
+# GUI-20: preserve complete warnings and errors in both modes.
+
+@pytest.mark.parametrize("mode", ["self", "target"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_gui_long_status_preserved(mode, failed):
+    app = fake_app(mode)
+    app.fields = {}
+
+    warnings = [
+        "Metadata provider unavailable. " * 20,
+        "Secondary provider request timed out. " * 20,
+    ]
+
+    gui.IPDiagnosticApp._update_ui(
+        app, {}, warnings, failed
+    )
+
+    message, color = app._set_status.call_args.args
+
+    assert "; ".join(warnings) in message
+    assert app._warnings == warnings
+    assert color == gui.COLORS[
+        "error" if failed else "warn"
+    ]
+
+    if failed:
+        expected = (
+            "Target lookup failed"
+            if mode == "target"
+            else "Network diagnostic failed"
+        )
+        assert message.startswith(expected)
+
+
+# GUI-21: field wrapping during window resizing.
+
+@pytest.mark.parametrize("width", [580, 900])
+def test_gui_resize_field_wrapping(width):
+    app = fake_app()
+    app.fields = {"ip": Mock(), "location": Mock()}
+
+    event = Mock()
+    event.widget = app
+    event.width = width
+
+    gui.IPDiagnosticApp._on_resize(app, event)
+
+    for field in app.fields.values():
+        field.config.assert_called_once_with(
+            wraplength=max(180, width - 280)
+        )
+
+
+# GUI-24: conditional status scrollbar.
+
+@pytest.mark.parametrize(
+    "first,last,visible,expected",
+    [
+        ("0.0", "1.0", False, "hidden"),
+        ("0.0", "0.4", False, "show"),
+        ("0.0", "1.0", True, "hide"),
+        ("0.0", "0.4", True, "unchanged"),
+        ("0.6", "1.0", True, "unchanged"),
+    ],
+)
+def test_gui_conditional_status_scrollbar(
+    first, last, visible, expected
+):
+    app = fake_app()
+
+    app.status_scrollbar.winfo_manager.return_value = (
+        "pack" if visible else ""
+    )
+
+    gui.IPDiagnosticApp._update_status_scrollbar(
+        app, first, last
+    )
+
+    app.status_scrollbar.set.assert_called_once_with(
+        first, last
+    )
+
+    if expected == "show":
+        app.status_scrollbar.pack.assert_called_once_with(
+            side="right",
+            fill="y",
+            before=app.status_text,
+        )
+        app.status_scrollbar.pack_forget.assert_not_called()
+
+    elif expected == "hide":
+        app.status_scrollbar.pack_forget.assert_called_once()
+        app.status_scrollbar.pack.assert_not_called()
+
+    else:
+        app.status_scrollbar.pack.assert_not_called()
+        app.status_scrollbar.pack_forget.assert_not_called()

@@ -267,7 +267,7 @@ class IPDiagnosticApp(tk.Tk):
 
     def create_widgets(self):
         """Build the BL-09 search and results layout."""
-        header = ttk.Frame(self, padding=(24, 22, 24, 12))
+        header = ttk.Frame(self, padding=(24, 14, 24, 6))
         header.pack(fill="x")
 
         ttk.Label(
@@ -285,7 +285,7 @@ class IPDiagnosticApp(tk.Tk):
         ).pack(fill="x", pady=(5, 0))
 
         # Search controls.
-        search = ttk.Frame(self, padding=(24, 8, 24, 8))
+        search = ttk.Frame(self, padding=(24, 4, 24, 4))
         search.pack(fill="x")
         search.columnconfigure(0, weight=1)
 
@@ -319,12 +319,11 @@ class IPDiagnosticApp(tk.Tk):
             sticky="w", pady=(5, 0)
         )
 
-        # Results card, rebuilt when the diagnostic mode changes.
+        # Allocate results space after reserving the footer.
         self.card = ttk.Frame(
-            self, style="Card.TFrame", padding=18
-        )
-        self.card.pack(
-            fill="both", expand=True, padx=24, pady=10
+            self,
+            style="Card.TFrame",
+            padding=12,
         )
 
         self.fields = {}
@@ -332,7 +331,7 @@ class IPDiagnosticApp(tk.Tk):
 
         # Preserve self-refresh and clipboard functionality.
         buttons = ttk.Frame(self, padding=(24, 5, 24, 5))
-        buttons.pack(fill="x")
+        # Packed after the status area to preserve footer space.
         buttons.columnconfigure(0, weight=1)
         buttons.columnconfigure(1, weight=1)
 
@@ -356,28 +355,75 @@ class IPDiagnosticApp(tk.Tk):
             row=0, column=1, sticky="ew", padx=(5, 0)
         )
 
-        # Wrap long messages to prevent warning clipping.
-        self.status_label = ttk.Label(
-            self,
-            text="Ready",
-            style="Status.TLabel",
-            padding=(24, 5, 24, 14),
-            wraplength=530,
-            justify="center",
-            anchor="center",
+        # Reserve footer space before allocating the results area.
+        self.status_frame = ttk.Frame(
+            self, padding=(24, 3, 24, 8)
         )
-        self.status_label.pack(fill="x")
+        self.status_frame.pack(side="bottom", fill="x")
+
+        self.status_text = tk.Text(
+            self.status_frame,
+            height=3,
+            width=1,
+            wrap="word",
+            font=(self.font_family, 9),
+            background=COLORS["bg"],
+            foreground=COLORS["muted"],
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=4,
+            pady=3,
+        )
+
+        self.status_scrollbar = ttk.Scrollbar(
+            self.status_frame,
+            orient="vertical",
+            command=self.status_text.yview,
+        )
+
+        self.status_text.configure(
+            yscrollcommand=self._update_status_scrollbar
+        )
+
+        self.status_text.pack(
+            side="left", fill="both", expand=True
+        )
+
+        self.status_text.tag_configure(
+            "status", justify="center"
+        )
+        self._set_status("Ready", COLORS["muted"])
+
+        buttons.pack(side="bottom", fill="x")
+
+        # The results area receives the remaining window space.
+        self.card.pack(
+            fill="both", expand=True, padx=24, pady=6
+        )
 
         self.bind("<Configure>", self._on_resize)
+
+    def _update_status_scrollbar(self, first, last):
+        """Show the status scrollbar only when text overflows."""
+        self.status_scrollbar.set(first, last)
+
+        needs_scroll = float(first) > 0.0 or float(last) < 1.0
+        is_visible = self.status_scrollbar.winfo_manager() == "pack"
+
+        if needs_scroll and not is_visible:
+            self.status_scrollbar.pack(
+                side="right",
+                fill="y",
+                before=self.status_text,
+            )
+        elif not needs_scroll and is_visible:
+            self.status_scrollbar.pack_forget()
 
     def _on_resize(self, event):
         """Keep status and field values within the available width."""
         if event.widget is not self:
             return
-
-        self.status_label.config(
-            wraplength=max(200, event.width - 60)
-        )
 
         for label in self.fields.values():
             label.config(
@@ -413,14 +459,14 @@ class IPDiagnosticApp(tk.Tk):
             style="CardTitle.TLabel",
         ).grid(
             row=0, column=0, columnspan=2,
-            sticky="w", pady=(0, 10)
+            sticky="w", pady=(0, 6)
         )
 
         ttk.Separator(
             self.card, orient="horizontal"
         ).grid(
             row=1, column=0, columnspan=2,
-            sticky="ew", pady=(0, 8)
+            sticky="ew", pady=(0, 4)
         )
 
         for row, (label_text, key) in enumerate(
@@ -432,7 +478,7 @@ class IPDiagnosticApp(tk.Tk):
                 style="FieldLabel.TLabel",
             ).grid(
                 row=row, column=0, sticky="nw",
-                pady=7, padx=(0, 15)
+                pady=4, padx=(0, 15)
             )
 
             value = ttk.Label(
@@ -444,7 +490,7 @@ class IPDiagnosticApp(tk.Tk):
                 anchor="e",
             )
             value.grid(
-                row=row, column=1, sticky="ne", pady=7
+                row=row, column=1, sticky="ne", pady=4
             )
 
             self.fields[key] = value
@@ -683,10 +729,23 @@ class IPDiagnosticApp(tk.Tk):
 
     def _set_status(self, text, color):
         """Update the status message using the shared color palette."""
-        self.status_label.config(
-            text=text,
-            foreground=color,
+        self.status_text.configure(
+            state="normal", foreground=color
         )
+        self.status_text.delete("1.0", "end")
+        self.status_text.insert("1.0", text, "status")
+        self.status_text.configure(state="disabled")
+        self.status_text.yview_moveto(0)
+        self.after(50, self._refresh_status_scrollbar)
+
+    def _refresh_status_scrollbar(self):
+        """Recheck scrollbar visibility after text layout."""
+        if self._closing:
+            return
+
+        self.status_text.update_idletasks()
+        first, last = self.status_text.yview()
+        self._update_status_scrollbar(first, last)
 
     def _on_close(self):
         """Close the window without waiting for daemon workers."""

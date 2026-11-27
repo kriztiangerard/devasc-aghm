@@ -510,3 +510,29 @@ performed using Homebrew Python 3.12.16 with Tk 9.1.0.
   dependency or a recommended production configuration.
 - Comprehensive manual GUI testing and independent
   acceptance criteria verification remain assigned to QA.
+
+### BL-09 — GUI Status Visibility QA Fix
+
+**Developer retest date:** November 27, 2026
+
+The GUI layout was refined to address the QA finding where
+status messages disappeared when the window height was reduced.
+
+Changes:
+- Reserved a dedicated status area at the bottom of the window.
+- Removed the results scrollbar and compacted result row spacing.
+- Preserved the original minimum window size of 580 × 580.
+- Added a conditional status scrollbar for overflowing warnings
+  and errors.
+- Added a deferred scrollbar refresh to ensure automatic visibility.
+- Preserved the original color scheme and centered status text.
+
+Verification:
+- BL-09 dedicated tests: 57 passed.
+- Full regression suite: 157 passed.
+- Native layout checks: 6 passed across self and target modes.
+- Native status checks: 6 passed for warnings, errors, and recovery.
+- Representative long result values fit without clipping.
+- Live GUI retesting completed by the developer.
+
+Independent QA approval and backend integration remain pending.
