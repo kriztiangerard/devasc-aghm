@@ -1,57 +1,54 @@
 """
-ip_core.py - Core networking module (Member 1, Phase 1 / Project Activity 3)
+ip_core.py - Core networking module (Member 1)
 
-Shared backend for the CLI (ip_diagnostic.py) and GUI (ip_diagnostic_gui.py).
-
-Architecture (hybrid, per the project plan):
-    Addressing layer  : ipify    -> explicit IPv4 (api.ipify.org) and IPv6 (api6.ipify.org)
-    Enrichment layer  : ipapi.co -> ISP, ASN, city, region, country, country code
+Shared by the CLI (ip_diagnostic.py) and GUI (ip_diagnostic_gui.py).
 
 Public API
 ----------
-get_public_ip_info() -> dict
+get_public_ip_info(include_extras=False) -> dict
+lookup_ip(target)                        -> dict   (BL-07 helper for Member 3)
+get_local_addresses()                    -> dict   (BL-01)
+detect_nat(local_ip, public_ip)          -> str    (BL-01)
+reverse_dns(ip)                          -> str    (BL-05)
 
-Result dict keys (always present):
-    ipv4, ipv6, city, region, country, country_code, isp, asn, errors
+Result dict keys (agreed shape, always present):
+    ipv4, ipv6, city, region, country, country_code, isp, asn
+Extra keys:
+    errors      list[str]   - human-readable problems, empty if all good
+    sources     dict        - which provider answered each field
+    latency_ms  dict        - round-trip time per successful call (BL-05)
+    (include_extras=True adds: local_ipv4, local_ipv6, nat_status, ptr)
 
-Defaults when a lookup fails:
-    ipv4 = "Unavailable", ipv6 = "Not Detected", everything else = "Unknown"
-
-The function never raises on network problems. Every failure (timeout,
-connection error, HTTP 429, non-200, bad JSON) is caught and added to the
-"errors" list as a readable string.
-
-NOTE for CLI/GUI authors: on an IPv4-only network, "errors" will contain
-IPv6 entries even though nothing is wrong. Do not show "errors" as an error
-banner by default.
-
-Phase 2 (Activity 4) will extend this module: BL-01 (NAT), BL-02 (failover),
-BL-05 (reverse DNS and latency).
+Nothing in here raises on network problems; failures end up in "errors".
 """
 
 import ipaddress
+import re
+import socket
+import time
 
 import requests
 
 TIMEOUT = 5  # seconds per request
 HEADERS = {"User-Agent": "ip-diagnostic/1.0"}
 
-IPIFY_V4_URL = "https://api.ipify.org?format=json"
-IPIFY_V6_URL = "https://api6.ipify.org?format=json"
-IPAPI_URL = "https://ipapi.co/{ip}/json/"
-IPAPI_SELF_URL = "https://ipapi.co/json/"
-
 UNAVAILABLE_V4 = "Unavailable"
 UNAVAILABLE_V6 = "Not Detected"
 UNKNOWN = "Unknown"
 
+CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 
+
+# --------------------------------------------------------------------------
+# Network exception handler
+# --------------------------------------------------------------------------
 class NetworkError(Exception):
     """Single exception type for every HTTP/network failure."""
 
 
 def _http_get(url, timeout=TIMEOUT):
-    """GET a URL and return the response, or raise NetworkError."""
+    """GET a URL. Returns (response, latency_ms) or raises NetworkError."""
+    start = time.perf_counter()
     try:
         resp = requests.get(url, timeout=timeout, headers=HEADERS)
     except requests.Timeout:
@@ -60,45 +57,217 @@ def _http_get(url, timeout=TIMEOUT):
         raise NetworkError("connection failed")
     except requests.RequestException as exc:
         raise NetworkError(str(exc))
+    latency = round((time.perf_counter() - start) * 1000, 1)
 
     if resp.status_code == 429:
         raise NetworkError("rate limited (HTTP 429)")
     if resp.status_code != 200:
         raise NetworkError(f"HTTP {resp.status_code}")
-    return resp
+    return resp, latency
 
 
-def _get_ip(url, version, errors):
-    """Ask ipify for an address. Returns the IP string, or None on failure."""
+# --------------------------------------------------------------------------
+# Response parsers
+# --------------------------------------------------------------------------
+def _json_object(resp):
+    """Decode JSON and require an object."""
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("expected a JSON object")
+    return data
+
+
+def _parse_json_ip(resp):
+    data = _json_object(resp)
+    return data.get("ip")
+
+
+def _parse_text_ip(resp):
+    return resp.text.strip()
+
+
+def _parse_trace_ip(resp):
+    for line in resp.text.splitlines():
+        if line.startswith("ip="):
+            return line[3:].strip()
+    raise ValueError("no ip= line in trace output")
+
+
+# Ordered by priority. First one that works wins (BL-02 failover).
+IPV4_PROVIDERS = [
+    ("ipify", "https://api.ipify.org?format=json", _parse_json_ip),
+    ("icanhazip", "https://ipv4.icanhazip.com", _parse_text_ip),
+    ("cloudflare", "https://1.1.1.1/cdn-cgi/trace", _parse_trace_ip),
+]
+IPV6_PROVIDERS = [
+    ("ipify", "https://api6.ipify.org?format=json", _parse_json_ip),
+    ("icanhazip", "https://ipv6.icanhazip.com", _parse_text_ip),
+]
+
+
+def _resolve_ip(version, providers, errors):
+    """Try each provider until one returns a valid IP of the right version.
+    Returns (ip | None, source | None, latency_ms | None)."""
+    for name, url, parser in providers:
+        try:
+            resp, latency = _http_get(url)
+            ip = parser(resp)
+            if not isinstance(ip, str) or not ip.strip():
+                raise ValueError("missing or invalid IP field")
+
+            ip = ip.strip()
+            address = ipaddress.ip_address(ip)
+
+            if address.version != version:
+                raise ValueError(f"returned IPv{address.version}")
+
+            return ip, name, latency
+        except NetworkError as exc:
+            errors.append(f"IPv{version} via {name}: {exc}")
+        except (ValueError, KeyError) as exc:
+            errors.append(f"IPv{version} via {name}: bad response ({exc})")
+    return None, None, None
+
+
+# --------------------------------------------------------------------------
+# Metadata (ISP / ASN / location) with failover
+# --------------------------------------------------------------------------
+def _meta_ipapi(ip):
+    url = f"https://ipapi.co/{ip}/json/" if ip else "https://ipapi.co/json/"
+    resp, latency = _http_get(url)
+    d = _json_object(resp)
+    if d.get("error"):
+        raise NetworkError(d.get("reason") or "ipapi.co returned an error")
+    return {
+        "city": d.get("city"),
+        "region": d.get("region"),
+        "country": d.get("country_name"),
+        "country_code": d.get("country_code"),
+        "isp": d.get("org"),
+        "asn": d.get("asn"),
+    }, latency
+
+
+def _meta_ipwho(ip):
+    resp, latency = _http_get(f"https://ipwho.is/{ip}")
+    d = _json_object(resp)
+    if not d.get("success", True):
+        raise NetworkError(d.get("message") or "ipwho.is returned an error")
+    conn = d.get("connection")
+    if conn is None:
+        conn = {}
+    if not isinstance(conn, dict):
+        raise ValueError("invalid connection object")
+
+    asn = conn.get("asn")
+    if asn is not None:
+        if isinstance(asn, bool) or not isinstance(asn, (int, str)):
+            raise ValueError("invalid ASN field")
+        if not str(asn).isascii() or not str(asn).isdigit():
+            raise ValueError("invalid ASN field")
+    return {
+        "city": d.get("city"),
+        "region": d.get("region"),
+        "country": d.get("country"),
+        "country_code": d.get("country_code"),
+        "isp": conn.get("isp") or conn.get("org"),
+        "asn": f"AS{asn}" if asn else None,
+    }, latency
+
+
+def _lookup_metadata(ip, errors):
+    """Returns (meta dict | None, source | None, latency_ms | None)."""
+    providers = [("ipapi.co", _meta_ipapi)]
+    if ip:  # ipwho.is needs an explicit IP
+        providers.append(("ipwho.is", _meta_ipwho))
+    for name, fn in providers:
+        try:
+            meta, latency = fn(ip)
+
+            if not isinstance(meta, dict):
+                raise ValueError("expected a metadata object")
+
+            for key, value in meta.items():
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"invalid metadata field: {key}")
+
+            meta = {
+                key: value.strip() if isinstance(value, str) else None
+                for key, value in meta.items()
+            }
+
+            if not any(
+                value and value.lower() != "unknown"
+                for value in meta.values()
+            ):
+                raise ValueError("no usable metadata fields")
+
+            return meta, name, latency
+        except NetworkError as exc:
+            errors.append(f"metadata via {name}: {exc}")
+        except (ValueError, KeyError, AttributeError) as exc:
+            errors.append(f"metadata via {name}: bad response ({exc})")
+    return None, None, None
+
+
+def _apply_meta(results, meta):
+    for key in ("city", "region", "country", "country_code", "isp", "asn"):
+        results[key] = (meta or {}).get(key) or UNKNOWN
+
+
+# --------------------------------------------------------------------------
+# BL-01: local interfaces & NAT comparison
+# --------------------------------------------------------------------------
+def _local_address(family, probe):
+    """Find the outbound local address. UDP connect() sends no packets."""
     try:
-        ip = _http_get(url).json()["ip"]
-        if ipaddress.ip_address(ip).version != version:
-            raise ValueError(f"expected IPv{version}, got a different version")
-        return ip
-    except NetworkError as exc:
-        errors.append(f"IPv{version} via ipify: {exc}")
-    except (ValueError, KeyError) as exc:
-        errors.append(f"IPv{version} via ipify: bad response ({exc})")
-    return None
+        with socket.socket(family, socket.SOCK_DGRAM) as s:
+            s.settimeout(2)
+            s.connect((probe, 80))
+            return s.getsockname()[0]
+    except OSError:
+        return None
 
 
-def _get_metadata(ip, errors):
-    """Ask ipapi.co for ISP/ASN/location. Returns a dict, or None on failure."""
-    url = IPAPI_URL.format(ip=ip) if ip else IPAPI_SELF_URL
+def get_local_addresses():
+    return {
+        "local_ipv4": _local_address(socket.AF_INET, "8.8.8.8"),
+        "local_ipv6": _local_address(socket.AF_INET6, "2001:4860:4860::8888"),
+    }
+
+
+def detect_nat(local_ip, public_ip):
+    """Classify the local vs public IPv4 relationship."""
+    if not local_ip or not public_ip:
+        return "Unknown"
     try:
-        data = _http_get(url).json()
-        if data.get("error"):  # ipapi.co reports some errors inside a 200 body
-            raise NetworkError(data.get("reason") or "ipapi.co returned an error")
-        return data
-    except NetworkError as exc:
-        errors.append(f"metadata via ipapi.co: {exc}")
-    except (ValueError, AttributeError) as exc:
-        errors.append(f"metadata via ipapi.co: bad response ({exc})")
-    return None
+        local = ipaddress.ip_address(local_ip)
+        if local == ipaddress.ip_address(public_ip):
+            return "No NAT (public IP on interface)"
+        if local in CGNAT_NET:
+            return "Carrier-Grade NAT (CGNAT) likely"
+        if local.is_private:
+            return "Behind NAT (private LAN address)"
+    except ValueError:
+        pass
+    return "Unknown"
 
 
-def get_public_ip_info():
-    """Collect public IPv4/IPv6 plus ISP, ASN and location. Never raises."""
+# --------------------------------------------------------------------------
+# BL-05: reverse DNS
+# --------------------------------------------------------------------------
+def reverse_dns(ip):
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except (socket.herror, socket.gaierror, OSError):
+        return "No PTR record"
+
+
+# --------------------------------------------------------------------------
+# Main entry points
+# --------------------------------------------------------------------------
+def get_public_ip_info(include_extras=False):
+    """Collect public IPv4/IPv6 + ISP/ASN/location. Never raises."""
     errors = []
     results = {
         "ipv4": UNAVAILABLE_V4,
@@ -110,24 +279,175 @@ def get_public_ip_info():
         "isp": UNKNOWN,
         "asn": UNKNOWN,
         "errors": errors,
+        "sources": {},
+        "latency_ms": {},
     }
 
-    v4 = _get_ip(IPIFY_V4_URL, 4, errors)
+    v4, src4, lat4 = _resolve_ip(4, IPV4_PROVIDERS, errors)
     if v4:
         results["ipv4"] = v4
+        results["sources"]["ipv4"] = src4
+        results["latency_ms"][src4] = lat4
 
-    v6 = _get_ip(IPIFY_V6_URL, 6, errors)
+    v6, src6, lat6 = _resolve_ip(6, IPV6_PROVIDERS, errors)
     if v6:
         results["ipv6"] = v6
+        results["sources"]["ipv6"] = src6
+        results["latency_ms"][f"{src6}-v6"] = lat6
 
-    data = _get_metadata(v4 or v6, errors)
-    if data:
-        results["city"] = data.get("city") or UNKNOWN
-        results["region"] = data.get("region") or UNKNOWN
-        results["country"] = data.get("country_name") or UNKNOWN
-        results["country_code"] = data.get("country_code") or UNKNOWN
-        results["isp"] = data.get("org") or UNKNOWN
-        results["asn"] = data.get("asn") or UNKNOWN
+    meta, src_m, lat_m = _lookup_metadata(v4 or v6, errors)
+    _apply_meta(results, meta)
+    if src_m:
+        results["sources"]["metadata"] = src_m
+        results["latency_ms"][src_m] = lat_m
+
+    if include_extras:
+        results.update(get_local_addresses())
+        results["nat_status"] = detect_nat(results["local_ipv4"], v4)
+        results["ptr"] = reverse_dns(v4 or v6) if (v4 or v6) else "N/A"
+
+    return results
+
+
+# --------------------------------------------------------------------------
+# BL-07: arbitrary target validation and lookup
+# --------------------------------------------------------------------------
+def _validate_target(target):
+    """Normalize an IPv4 address, IPv6 address, or DNS hostname.
+
+    Returns:
+        tuple: (normalized target, is_ip_address).
+
+    Raises:
+        ValueError: If the supplied target is invalid.
+    """
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("Target must not be empty.")
+
+    target = target.strip()
+
+    # Scoped IPv6 addresses are local-interface identifiers rather than
+    # ordinary public IP lookup targets.
+    if "%" in target:
+        raise ValueError("Scoped IP addresses are not supported.")
+
+    # Accept valid literal IPv4 and IPv6 addresses directly.
+    try:
+        return str(ipaddress.ip_address(target)), True
+    except ValueError:
+        pass
+
+    # Prevent malformed IP literals from being treated as hostnames.
+    if ":" in target or re.fullmatch(r"[0-9.]+", target):
+        raise ValueError("Invalid IP address.")
+
+    # Convert internationalized domain names to DNS-compatible ASCII.
+    try:
+        hostname = target.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("Invalid hostname.") from None
+
+    # A trailing dot is valid for a fully qualified DNS hostname.
+    labels = hostname.rstrip(".").split(".")
+
+    if (
+        hostname.endswith("..")
+        or len(hostname.rstrip(".")) > 253
+        or not all(
+            re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+                label,
+            )
+            for label in labels
+        )
+    ):
+        raise ValueError(
+            "Invalid hostname. Enter an IP address or hostname, not a URL."
+        )
+
+    return hostname.lower(), False
+
+
+def _resolve_target_hostname(hostname):
+    """Resolve a hostname to one IPv4 or IPv6 address.
+
+    IPv4 is preferred for compatibility with the original lookup behavior.
+    IPv6 is used when no IPv4 address is available.
+    """
+    records = socket.getaddrinfo(
+        hostname,
+        None,
+        family=socket.AF_UNSPEC,
+        type=socket.SOCK_STREAM,
+    )
+
+    addresses = []
+
+    for family, _, _, _, sockaddr in records:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+
+        if address not in addresses:
+            addresses.append(address)
+
+    for version in (4, 6):
+        for address in addresses:
+            if address.version == version:
+                return str(address)
+
+    raise OSError("No IPv4 or IPv6 address found.")
+
+
+def lookup_ip(target):
+    """Retrieve metadata for an arbitrary IPv4, IPv6, or hostname.
+
+    Validation and DNS failures are returned through the errors list.
+    Metadata retrieval reuses the existing provider failover mechanism.
+
+    The result structure remains compatible with CLI exports and the GUI.
+    """
+    errors = []
+
+    results = {
+        "target": target,
+        "ip": UNKNOWN,
+        "city": UNKNOWN,
+        "region": UNKNOWN,
+        "country": UNKNOWN,
+        "country_code": UNKNOWN,
+        "isp": UNKNOWN,
+        "asn": UNKNOWN,
+        "errors": errors,
+    }
+
+    try:
+        normalized, is_ip = _validate_target(target)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return results
+
+    results["target"] = target.strip()
+
+    if is_ip:
+        ip = normalized
+    else:
+        try:
+            ip = _resolve_target_hostname(normalized)
+        except OSError:
+            errors.append(f"could not resolve '{normalized}'")
+            return results
+
+    # Preserve the resolved IP even when metadata providers fail.
+    results["ip"] = ip
+
+    # Reuse the shared metadata retrieval and failover implementation.
+    meta, _, _ = _lookup_metadata(ip, errors)
+    _apply_meta(results, meta)
 
     return results
 
@@ -135,4 +455,4 @@ def get_public_ip_info():
 if __name__ == "__main__":
     import json
 
-    print(json.dumps(get_public_ip_info(), indent=2))
+    print(json.dumps(get_public_ip_info(include_extras=True), indent=2))
