@@ -13,13 +13,13 @@ import queue
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
 import customtkinter as ctk
-from map_panel import GeolocationMapCard
-
+from exporter import build_export_payload, export_csv, export_json, export_pdf
 from ip_core import UNKNOWN, get_public_ip_info, lookup_ip
+from map_panel import GeolocationMapCard
 
 # --------------------------------------------------------------------------
 # Configuration & Palettes
@@ -309,6 +309,7 @@ class IPDiagnosticApp(ctk.CTk):
         self.buttons_frame.pack(side="bottom", fill="x", padx=24, pady=(6, 4))
         self.buttons_frame.columnconfigure(0, weight=1)
         self.buttons_frame.columnconfigure(1, weight=1)
+        self.buttons_frame.columnconfigure(2, weight=1)
 
         self.refresh_btn = _CompatCTkButton(
             self.buttons_frame,
@@ -327,6 +328,15 @@ class IPDiagnosticApp(ctk.CTk):
             command=self.copy_report,
         )
         self.copy_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        self.export_btn = _CompatCTkButton(
+            self.buttons_frame,
+            text="Export...",
+            font=ctk.CTkFont(family=self.font_family, size=12, weight="bold"),
+            height=36,
+            command=self.open_export_dialog,
+        )
+        self.export_btn.grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
         # Main content container (Card area)
         self.content_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -355,7 +365,6 @@ class IPDiagnosticApp(ctk.CTk):
         self._theme_mode = "dark" if self.theme_switch.get() == 1 else "light"
         ctk.set_appearance_mode("Dark" if self._theme_mode == "dark" else "Light")
         self._apply_theme_colors()
-        
 
     def _apply_theme_colors(self):
         c = _palette_for(self)
@@ -415,6 +424,7 @@ class IPDiagnosticApp(ctk.CTk):
 
         self.card.columnconfigure(0, weight=0)
         self.card.columnconfigure(1, weight=1)
+        self.card.columnconfigure(2, weight=0)
 
         self._card_heading_label = ctk.CTkLabel(
             self.card,
@@ -424,12 +434,12 @@ class IPDiagnosticApp(ctk.CTk):
             anchor="w",
         )
         self._card_heading_label.grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 6)
+            row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 6)
         )
 
         self._card_separator = ctk.CTkFrame(self.card, height=1, fg_color=c["border"])
         self._card_separator.grid(
-            row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 8)
+            row=1, column=0, columnspan=3, sticky="ew", padx=16, pady=(0, 8)
         )
 
         for row, (label_text, key) in enumerate(definitions, start=2):
@@ -452,7 +462,22 @@ class IPDiagnosticApp(ctk.CTk):
                 justify="right",
                 anchor="e",
             )
-            value.grid(row=row, column=1, sticky="ne", pady=5, padx=(0, 16))
+            value.grid(row=row, column=1, sticky="ne", pady=5, padx=(0, 8))
+
+            copy_btn = _CompatCTkButton(
+                self.card,
+                text="Copy",
+                width=56,
+                height=24,
+                font=ctk.CTkFont(family=self.font_family, size=10, weight="bold"),
+                fg_color=("gray82", "gray26"),
+                text_color=("gray10", "gray90"),
+                hover_color=("gray72", "gray36"),
+            )
+            copy_btn.configure(
+                command=lambda k=key, b=copy_btn: self.copy_single_field(k, b)
+            )
+            copy_btn.grid(row=row, column=2, sticky="e", pady=4, padx=(0, 14))
             self.fields[key] = value
 
     def _on_search_enter(self, event):
@@ -488,6 +513,8 @@ class IPDiagnosticApp(ctk.CTk):
             self.copy_btn,
         ):
             widget.config(state=state)
+        if getattr(self, "export_btn", None) is not None:
+            self.export_btn.config(state=state)
 
     def _start_request(self, mode, target=None):
         if self._busy or self._closing:
@@ -641,6 +668,30 @@ class IPDiagnosticApp(ctk.CTk):
 
         return "\n".join(lines) + "\n"
 
+    def copy_single_field(self, key, btn):
+        if self._busy or self._closing:
+            return
+        try:
+            value = self.fields[key].cget("text")
+            self.clipboard_clear()
+            self.clipboard_append(value)
+            self.update_idletasks()
+            self._last_status_kind = "ok"
+            self._set_status(
+                f"Copied {key.replace('_', ' ').upper()} to clipboard.",
+                _palette_for(self)["ok"],
+            )
+            btn.configure(text="Copied!")
+            self.after(
+                1200,
+                lambda: btn.configure(text="Copy") if btn.winfo_exists() else None,
+            )
+        except tk.TclError as exc:
+            self._last_status_kind = "error"
+            self._set_status(
+                f"Unable to copy field: {exc}", _palette_for(self)["error"]
+            )
+
     def copy_report(self):
         if self._busy or self._closing:
             return
@@ -651,7 +702,55 @@ class IPDiagnosticApp(ctk.CTk):
             messagebox.showinfo("Copied", "Diagnostic report copied to clipboard!")
         except tk.TclError as exc:
             self._last_status_kind = "error"
-            self._set_status(f"Unable to copy report: {exc}", _palette_for(self)["error"])
+            self._set_status(
+                f"Unable to copy report: {exc}", _palette_for(self)["error"]
+            )
+
+    def open_export_dialog(self):
+        if self._busy or self._closing:
+            return
+
+        definitions = (
+            TARGET_FIELD_DEFINITIONS if self._mode == "target" else FIELD_DEFINITIONS
+        )
+        fields_data = {
+            label_text.rstrip(":"): self.fields[key].cget("text")
+            for label_text, key in definitions
+        }
+        payload = build_export_payload(
+            mode=self._mode,
+            fields_data=fields_data,
+            timestamp=self.last_updated,
+            warnings=self._warnings,
+            failed=self._failed,
+        )
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Diagnostic Report",
+            defaultextension=".pdf",
+            filetypes=[
+                ("PDF Report", "*.pdf"),
+                ("JSON File", "*.json"),
+                ("CSV Spreadsheet", "*.csv"),
+            ],
+        )
+        if not filepath:
+            return
+
+        try:
+            lower = filepath.lower()
+            if lower.endswith(".json"):
+                export_json(payload, filepath)
+            elif lower.endswith(".csv"):
+                export_csv(payload, filepath)
+            else:
+                export_pdf(payload, filepath)
+            self._last_status_kind = "ok"
+            self._set_status(
+                f"Report exported to {filepath}", _palette_for(self)["ok"]
+            )
+        except OSError as exc:
+            messagebox.showerror("Export Failed", f"Could not save report:\n{exc}")
 
     def _set_status(self, text, color):
         self.status_text.configure(state="normal", foreground=color)
