@@ -17,13 +17,14 @@ from tkinter import messagebox, ttk
 from tkinter import font as tkfont
 
 import customtkinter as ctk
+from map_panel import GeolocationMapCard
 
 from ip_core import UNKNOWN, get_public_ip_info, lookup_ip
 
 # --------------------------------------------------------------------------
 # Configuration & Palettes
 # --------------------------------------------------------------------------
-WINDOW_WIDTH = 640
+WINDOW_WIDTH = 980
 MIN_HEIGHT = 600
 STATUS_WRAP = WINDOW_WIDTH - 40
 
@@ -175,7 +176,7 @@ class IPDiagnosticApp(ctk.CTk):
 
         self.title("IP Network Diagnostic Utility")
         self.geometry(f"{WINDOW_WIDTH}x{MIN_HEIGHT}")
-        self.minsize(580, 580)
+        self.minsize(860, 580)
         self.resizable(True, True)
 
         self.font_family = self._pick_font()
@@ -338,6 +339,12 @@ class IPDiagnosticApp(ctk.CTk):
         )
         self.card.pack(side="left", fill="both", expand=True)
 
+        self.map_card = GeolocationMapCard(
+            self.content_frame,
+            font_family=self.font_family,
+        )
+        self.map_card.pack(side="right", fill="both", expand=True, padx=(14, 0))
+
         self.fields = {}
         self._render_fields("self")
 
@@ -348,6 +355,7 @@ class IPDiagnosticApp(ctk.CTk):
         self._theme_mode = "dark" if self.theme_switch.get() == 1 else "light"
         ctk.set_appearance_mode("Dark" if self._theme_mode == "dark" else "Light")
         self._apply_theme_colors()
+        
 
     def _apply_theme_colors(self):
         c = _palette_for(self)
@@ -360,6 +368,8 @@ class IPDiagnosticApp(ctk.CTk):
             foreground=c.get(self._last_status_kind, c["muted"]),
         )
         self._recolor_card_children()
+        if getattr(self, "map_card", None) is not None:
+            self.map_card.apply_palette(c)
 
     def _recolor_card_children(self):
         c = _palette_for(self)
@@ -564,6 +574,22 @@ class IPDiagnosticApp(ctk.CTk):
             self.progress_bar.set(1)
 
         self._set_busy(False)
+
+        if getattr(self, "map_card", None) is not None:
+            active_ip = (
+                data.get("ip")
+                if self._mode == "target"
+                else (
+                    data.get("ipv4")
+                    if data.get("ipv4") not in (None, "Unavailable", UNKNOWN)
+                    else data.get("ipv6")
+                )
+            )
+            self.map_card.update_from_result(
+                active_ip,
+                data.get("location"),
+                failed=failed,
+            )
 
         stamp = self.last_updated.strftime("%H:%M:%S")
         palette = _palette_for(self)
